@@ -1,6 +1,7 @@
 import os
 import re
 import argparse
+import sys
 from time import sleep
 
 import requests
@@ -9,22 +10,16 @@ from bs4 import BeautifulSoup
 class InlineDisplay:
     def __init__(self):
         self.currlen = 0
-        self.lastlen = 0
-
-    @property
-    def padline(self):
-        pad = self.lastlen - self.currlen
-        pad = pad if pad > 0 else 0
-        return ' ' * pad
 
     def display(self, s):
         print(s, end=' ')
+        sys.stdout.flush()
         self.currlen += len(s) + 1
 
     def reset(self):
-        print(padline, end='')
         print('', end='\r')
-        self.lastlen = self.currlen
+        print(' ' * self.currlen, end='\r')
+        sys.stdout.flush()
         self.currlen = 0
 
 _id = InlineDisplay()
@@ -45,7 +40,6 @@ def request_loop(url, timeout=1.0, sleep_base=1.0):
         try:
             response = requests.get(url, timeout=timeout)
             response.raise_for_status()
-            display('Success!')
             return response.text
         except requests.exceptions.HTTPError:
             code = response.status_code
@@ -66,10 +60,20 @@ if __name__ == "__main__":
     # command line interface
     parser = argparse.ArgumentParser(description='Parse Fanfiction')
     group = parser.add_mutually_exclusive_group()
-    group.add_argument('-s', '--search', action='store', help="search term to search for a tag to scrape")
-    group.add_argument('-t', '--tag', action='store', nargs=1, help="the tag to be scraped")
-    group.add_argument('-u', '--url', action='store', nargs=1, help="the full URL of first page to be scraped")
-    parser.add_argument('-o', '--outfile', action='store', nargs=1, default='scraped-html', help="target directory for scraped files")
+    group.add_argument(
+        '-s', '--search', action='store',
+        help="search term to search for a tag to scrape")
+    group.add_argument(
+        '-t', '--tag', action='store', nargs=1, help="the tag to be scraped")
+    group.add_argument(
+        '-u', '--url', action='store', nargs=1,
+        help="the full URL of first page to be scraped")
+    parser.add_argument(
+        '-o', '--outfile', action='store', nargs=1, default='scraped-html',
+        help="target directory for scraped files")
+    parser.add_argument(
+        '-p', '--startpage', action='store', nargs=1, default=[1], type=int,
+        help="page on which to begin downloading (to resume a previous job)")
 
     args = parser.parse_args()
     argv = vars(args)
@@ -102,9 +106,11 @@ if __name__ == "__main__":
 
             pp += 1
 
+    error_works = set(['11442951'])
+
     # fan work scraping options
     if headerVal or tagVal:
-        end = 1 #pagination
+        end = args.startpage[0] #pagination
         os.chdir(targetVal) #target directory
 
         while (len(resultList)) != 0:
@@ -142,19 +148,37 @@ if __name__ == "__main__":
             reset_display()
             for x in resultList:
                 body = str(x).split('"')
-                docID = str(body[1]).split('/')
-                display('Loading work {};'.format(docID[2]))
+                docID = str(body[1]).split('/')[2]
+                filename = str(docID) + '.html'
 
-                work_request_url = "http://archiveofourown.org/" + body[1] + "?view_adult=true&view_full_work=true"
-                work_page = request_loop(work_request_url)
-                filename = str(docID[2]) + '.html'
-                with open(filename, 'w', encoding='utf-8') as html_out:
-                    bytes_written = html_out.write(str(work_page))
+                if os.path.exists(filename):
+                    display('Work {} already exists -- skpping;'.format(docID))
+                    reset_display()
+                    with open('log.txt', 'a') as f:
+                        msg = ('skipped existing document {} on '
+                               'page {} ({} bytes)\n')
+                        f.write(msg.format(docID, str(end),
+                                           os.path.getsize(filename)))
+                elif docID in error_works:
+                    display('Work {} is known to cause errors '
+                            '-- skipping;'.format(docID))
+                    reset_display()
+                    with open('log.txt', 'a') as f:
+                        msg = ('skipped document {} on page {} '
+                               'known to cause errors')
+                        f.write(msg.format(docID, str(end)))
 
-                with open("log.txt", "a") as f:
-                    msg = 'reached document {} on page {}, saved {} bytes\n'
-                    f.write(msg.format(docID[2], str(end), bytes_written))
-                reset_display()
+                else:
+                    display('Loading work {};'.format(docID))
+                    work_request_url = "http://archiveofourown.org/" + body[1] + "?view_adult=true&view_full_work=true"
+                    work_page = request_loop(work_request_url)
+                    with open(filename, 'w', encoding='utf-8') as html_out:
+                        bytes_written = html_out.write(str(work_page))
+
+                    with open("log.txt", "a") as f:
+                        msg = 'reached document {} on page {}, saved {} bytes\n'
+                        f.write(msg.format(docID, str(end), bytes_written))
+                    reset_display()
 
             reset_display()
             end += 1
