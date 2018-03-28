@@ -2,10 +2,32 @@ import os
 import re
 import argparse
 import sys
+import random
 from time import sleep
 
 import requests
 from bs4 import BeautifulSoup
+
+class Logger:
+    def __init__(self, logfile='log.txt'):
+        self.logfile = logfile
+
+    def log(self, msg, newline=True):
+        with open(self.logfile, 'a') as f:
+            f.write(msg)
+            if newline:
+                f.write('\n')
+
+_logger = Logger()
+log = _logger.log
+
+_error_id_log = Logger(logfile='error-ids.txt')
+log_error_id = _error_id_log.log
+
+def load_error_ids():
+    with open(_error_id_log.logfile) as ip:
+        ids = set(l.strip() for l in ip.readlines())
+        return ids
 
 class InlineDisplay:
     def __init__(self):
@@ -26,15 +48,17 @@ _id = InlineDisplay()
 display = _id.display
 reset_display = _id.reset
 
-def request_loop(url, timeout=1.0, sleep_base=1.0):
+def request_loop(url, timeout=4.0, sleep_base=1.0):
     # We try 20 times. But we double the delay each time,
     # so that we don't get really annoying. Eventually the
-    # delay could be many days long, but well before that
-    # happens, the server should be up and running again,
-    # and the request will finally succeed.
+    # delay will be more than an hour long, at which point
+    # we'll try a few more times, and then give up.
 
-    response = None
+    orig_url = url
     for i in range(20):
+        if sleep_base > 7200:  # Only delay up to an hour.
+            sleep_base /= 2
+            url = '{}#{}'.format(orig_url, random.randrange(1000))
         display('Sleeping for {} seconds;'.format(sleep_base))
         sleep(sleep_base)
         try:
@@ -49,11 +73,14 @@ def request_loop(url, timeout=1.0, sleep_base=1.0):
             else:
                 sleep_base *= 2
                 display('Recoverable error ({});'.format(code))
-        except (requests.exceptions.ReadTimeout,
-                requests.exceptions.RequestException):
+        except requests.exceptions.ReadTimeout as exc:
             sleep_base *= 2
-            display('Unknown error, trying again;')
-    return response.text
+            display('Read timed out -- trying again;')
+        except requests.exceptions.RequestException as exc:
+            sleep_base *= 2
+            display('Unexpected error ({}), trying again;\n'.format(exc))
+    else:
+        return None
 
 if __name__ == "__main__":
 
@@ -93,7 +120,7 @@ if __name__ == "__main__":
         # the alternative here is to scrape this page and use regex to filter the results:
         # http://archiveofourown.org/media/Movies/fandoms?
         # the canonical filter is used here because the "fandom" filter on the beta tag search is broken as of November 2017
-        searchRef = "http://archiveofourown.org/tags/search?utf8=%E2%9C%93&query%5Bname%5D=" + safeSearch + "&query%5Btype%5D=&query%5Bcanonical%5D=true&page="
+        searchRef = "https://archiveofourown.org/tags/search?utf8=%E2%9C%93&query%5Bname%5D=" + safeSearch + "&query%5Btype%5D=&query%5Bcanonical%5D=true&page="
         print('\nTags:')
 
         while (len(tagList)) != 0:
@@ -106,16 +133,15 @@ if __name__ == "__main__":
 
             pp += 1
 
-    error_works = set(['11442951'])
 
     # fan work scraping options
     if headerVal or tagVal:
         end = args.startpage[0] #pagination
         os.chdir(targetVal) #target directory
+        error_works = load_error_ids()
 
         while (len(resultList)) != 0:
-            with open('log.txt', 'a') as f:
-                f.write('\n\nPAGE ' + str(end) + '\n')
+            log('\n\nPAGE ' + str(end))
             print('Page {} '.format(end))
 
             display('Loading table of contents;')
@@ -124,15 +150,14 @@ if __name__ == "__main__":
 
             if tagVal:
                 modHeaderVal = tagVal[0].replace(' ', '%20')
-                header = "http://archiveofourown.org/tags/" + modHeaderVal + "/works?page="
+                header = "https://archiveofourown.org/tags/" + modHeaderVal + "/works?page="
 
             page_request_url = header + str(end)
             toc_page = request_loop(page_request_url)
 
             if not toc_page:
                 err_msg = 'Error loading TOC; aborting.'
-                with open('log.txt', 'a') as f:
-                    f.write(err_msg + '\n')
+                log(err_msg)
                 display(err_msg)
                 reset_display()
                 continue
@@ -140,10 +165,9 @@ if __name__ == "__main__":
             toc_page_soup = BeautifulSoup(toc_page, "lxml")
             resultList = toc_page_soup(attrs={'href': re.compile('^/works/[0-9]+[0-9]$')})
 
-            with open("log.txt", "a") as f:
-                f.write('Number of Works on Page ' + str(end) + ': ' + str((len(resultList))) + '\n')
-                f.write('Page URL: {}\n'.format(page_request_url))
-                f.write('Progress: \n')
+            log('Number of Works on Page {}: {}'.format(end, len(resultList)))
+            log('Page URL: {}'.format(page_request_url))
+            log('Progress: ')
 
             reset_display()
             for x in resultList:
@@ -154,30 +178,33 @@ if __name__ == "__main__":
                 if os.path.exists(filename):
                     display('Work {} already exists -- skpping;'.format(docID))
                     reset_display()
-                    with open('log.txt', 'a') as f:
-                        msg = ('skipped existing document {} on '
-                               'page {} ({} bytes)\n')
-                        f.write(msg.format(docID, str(end),
-                                           os.path.getsize(filename)))
+                    msg = ('skipped existing document {} on '
+                           'page {} ({} bytes)')
+                    log(msg.format(docID, str(end),
+                                   os.path.getsize(filename)))
                 elif docID in error_works:
                     display('Work {} is known to cause errors '
                             '-- skipping;'.format(docID))
                     reset_display()
-                    with open('log.txt', 'a') as f:
-                        msg = ('skipped document {} on page {} '
-                               'known to cause errors')
-                        f.write(msg.format(docID, str(end)))
+                    msg = ('skipped document {} on page {} '
+                           'known to cause errors')
+                    log(msg.format(docID, str(end)))
 
                 else:
                     display('Loading work {};'.format(docID))
-                    work_request_url = "http://archiveofourown.org/" + body[1] + "?view_adult=true&view_full_work=true"
+                    work_request_url = "https://archiveofourown.org/" + body[1] + "?view_adult=true&view_full_work=true"
                     work_page = request_loop(work_request_url)
+
+                    if work_page is None:
+                        error_works.add(docID)
+                        log_error_id(docID)
+                        continue
+
                     with open(filename, 'w', encoding='utf-8') as html_out:
                         bytes_written = html_out.write(str(work_page))
 
-                    with open("log.txt", "a") as f:
-                        msg = 'reached document {} on page {}, saved {} bytes\n'
-                        f.write(msg.format(docID, str(end), bytes_written))
+                    msg = 'reached document {} on page {}, saved {} bytes'
+                    log(msg.format(docID, str(end), bytes_written))
                     reset_display()
 
             reset_display()
